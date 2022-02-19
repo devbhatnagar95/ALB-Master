@@ -1,0 +1,448 @@
+<!doctype html>
+<html>
+<head>
+    <title>CPU Usage</title>
+    <script src="https://cdn.socket.io/socket.io-1.2.0.js"></script>
+    <script src="http://code.jquery.com/jquery-1.11.1.js"></script>
+    <script src="https://dl.dropboxusercontent.com/u/36831702/js/highcharts.js"></script>
+    <script src="https://dl.dropboxusercontent.com/u/36831702/js/modules/exporting.js"></script>
+    <script src="https://dl.dropboxusercontent.com/u/36831702/js/highcharts-3d.src.js"></script>
+    <script src="https://dl.dropboxusercontent.com/u/36831702/js/highchart-helper.js"></script>
+
+    <script>
+    $(function(){
+
+        var socket = io.connect("http://192.168.56.101:3000");
+        var connectedToLoadSim = false;
+
+
+        createChart('#container', 'CPU_Usage', 'datetime', 100, "Time", "Usage %");
+        createChart('#container2', 'Optimal_Servers', 'datetime', 10, "Time Slice", "No. Of Servers");
+        createChart('#responseTime', 'Response_Time', 'datetime', 3, "Time", "Seconds");
+
+        function connectToLoadSim(){
+            connectedToLoadSim = true;
+            var webSocket = new WebSocket("ws://127.0.0.1:9000/ws");
+            webSocket.onopen = function (event) {
+                webSocket.send("Socket Open")
+            }
+
+            webSocket.onmessage = function (event) {
+                if(Response_Time === undefined){
+                    return;
+                }
+
+                if(Response_Time.get("ResponseTime") == null) {
+                    Response_Time.addSeries({
+                        name: "Response Time",
+                        id: "ResponseTime",
+                        data: []
+                    });
+                }
+
+
+                Response_Time.get("ResponseTime").addPoint([new Date().getTime(), Number(event.data)], true, false, true);
+            }
+
+            webSocket.onclose = function(event){
+                connectedToLoadSim = false;
+            }
+        }
+
+        function createChart(id, title, xAxisType, max, xAxisLabel, yAxisLabel){
+            $(id).highcharts({
+                chart: {
+                    type: 'spline',
+                    marginRight: 10,
+                    events: {
+                        load: function () {
+                            window[title] = this;
+                        }
+                    }
+                },
+                title: {
+                    text: title
+                },
+
+                yAxis: {
+                    title: {
+                        text: yAxisLabel
+                    },
+                    plotLines: [{
+                        value: 0,
+                        width: 1,
+                        color: '#808080'
+                    }],
+                    min: 0,
+                    max: max,
+                    allowDecimals: false
+                },
+                xAxis: {
+                    title: {
+                        text: xAxisLabel
+                    },
+                    type: xAxisType,
+                    tickPixelInterval: 100,
+                    allowDecimals: false
+                },
+                tooltip: {
+                    formatter: function () {
+                        return '<b>' + this.series.name + '</b><br/>' +
+                        Highcharts.dateFormat('%Y-%m-%d %H:%M:%S', this.x) + '<br/>' +
+                        Highcharts.numberFormat(this.y, 2);
+                    }
+                }
+            });
+        }
+
+
+
+
+        socket.on('cpu-ip', function(msg){
+            msg = JSON.parse(msg);
+
+            if(CPU_Usage === undefined){
+                console.log('chart undefined');
+                return;
+            }
+
+            var series = CPU_Usage.get(msg.ip);
+
+            if(series == null) {
+                CPU_Usage.addSeries({
+                    name: "Load for " + msg.ip,
+                    id: msg.ip,
+                    data: []
+                });
+
+                series = CPU_Usage.get(msg.ip);
+            }
+
+            series.addPoint([(new Date()).getTime(), parseFloat(msg.usage)], true, false, true);
+
+
+            var min = new Date().setMinutes(new Date().getMinutes() - 3);
+            var max = new Date().setMinutes(new Date().getMinutes() + 1);
+            //CPU_Usage.xAxis[0].setExtremes(min, max);
+
+
+        });
+
+        function timeIntervalToDate(interval){
+            var time = 1388534400 * 1000;
+            return (new Date(time + (interval * 120))).getTime();
+        }
+
+        function getZIndex(series_name){
+            switch(series_name) {
+                case "Training_Data":
+                    return 0;
+                case "Test_Recording":
+                    return 1;
+                case "Prediction":
+                    return 2;
+                default: throw "Unexpected Series";
+            }
+        }
+
+        socket.on('optimal-servers', function(msg){
+
+            if(!connectedToLoadSim){
+                connectToLoadSim();
+            }
+
+            msg = JSON.parse(msg);
+            if(Optimal_Servers === undefined){
+                return;
+            }
+
+            var series = Optimal_Servers.get(msg.series);
+
+            console.log(msg.series);
+
+            if(series == null) {
+                Optimal_Servers.addSeries({
+                    name: msg.series,
+                    id: msg.series,
+                    data: [] ,
+                    zIndex: getZIndex(msg.series)
+                });
+
+                series = Optimal_Servers.get(msg.series);
+            }
+
+            series.addPoint([timeIntervalToDate(msg.timeInterval), msg.optimalServers]);
+            Optimal_Servers.xAxis[0].setExtremes(timeIntervalToDate(1000), timeIntervalToDate(100 * 10000));
+        });
+
+        var w0 = 0;
+        var w1 = 0;
+        var w2 = 0;
+
+
+        function addJitter(p){
+            var jitterAmount = 0.125;
+            return p.map(function(x) { return x + Math.random() * jitterAmount - jitterAmount / 2; });
+        }
+
+        function addMlData(chart){
+            socket.on('ml-data', function(msg){
+                //console.log(msg)
+                chart.get('opt-servers').addPoint(addJitter(JSON.parse(msg)));
+            });
+        }
+
+        function getZ(x, y){
+            return (w1 * x) + (w2 * y) + w0;
+        }
+
+        function partition(ps, prop){
+            ps = ps.sort(function(p1, p2){
+                return p1[prop] - p2[prop]
+            });
+
+            var smallest = ps.slice(0,ps.length/2);
+            var largest  = ps.slice(ps.length/2, ps.length);
+            return {"smallest":smallest, "largest": largest }
+
+        }
+
+
+        function sortPoints(ps){
+            var partZ = partition(ps, "z")
+            var firstFour = partZ.smallest;
+            var lastFour  = partZ.largest;
+
+
+
+            var partY1 = partition(firstFour, "y");
+            var firstTwo  = partY1.smallest;
+            var secondTwo = partY1.largest;
+
+            var partY2 = partition(lastFour, "y");
+            var thirdTwo  = partY2.largest;
+            var lastTwo   = partY2.smallest;
+
+            var partX1 = partition(firstTwo, "x");
+            var partX2 = partition(secondTwo, "x");
+            var partX3 = partition(thirdTwo, "x");
+            var partX4 = partition(lastTwo, "x");
+
+            var first   = partX1.smallest[0];
+            var second  = partX1.largest[0];
+            var third   = partX2.largest[0];
+            var fourth  = partX2.smallest[0];
+            var fifth   = partX3.smallest[0];
+            var sixth   = partX3.largest[0];
+            var seventh = partX4.largest[0];
+            var eighth  = partX4.smallest[0];
+
+            var ps = [first, second, third, fourth, fifth, sixth, seventh, eighth];
+            return ps;
+        }
+
+        var plane = null;
+        var planeHeight = 4;
+        function createPlanePoints(p1,p2,p7,p8) {
+            return [p1,
+                    p2,
+                {"x": p2.x, "y": p2.y + planeHeight, "z": p2.z},
+                {"x": p1.x, "y": p1.y + planeHeight, "z": p1.z},
+                {"x": p8.x, "y": p8.y + planeHeight, "z": p8.z},
+                {"x": p7.x, "y": p7.y + planeHeight, "z": p7.z},
+                p7,
+                p8];
+        }
+
+        function createPlane(){
+            return createPlanePoints(scaleToView({"x": 0, "y": 10, "z": getZ(0,10)}),
+            scaleToView({"x": 10, "y": 10, "z": getZ(10,10)}),
+            scaleToView({"x": 10, "y": 0, "z": getZ(10,0)}),
+            scaleToView({"x": 0, "y": 0, "z": getZ(0,0)}));
+        }
+
+        function addPoint(p1, p2){
+            return {"x": p1.x + p2.x, "y": p1.y + p2.y, "z": p1.z + p2.z};
+        }
+
+        function scaleToView(p) {
+            var originDrawLocation = {"x": 100, "y": 700, "z":0};
+            var yAxisUnitLength = 60;
+            var xAxisUnitLength = 60;
+            var zAxisUnitLength = 27;
+            p.y = p.y * yAxisUnitLength * -1;
+            p.x = p.x * xAxisUnitLength;
+            p.z = p.z * zAxisUnitLength;
+            return addPoint(p, originDrawLocation);
+        }
+
+
+        var alpha = 0;
+        var beta  = 0;
+        var c = null;
+
+        function render(){
+            //console.log('Trying to render');
+            if(plane != null){
+                plane.destroy();
+            }
+
+            plane = c.renderer.cuboid( {
+                "points" : sortPoints(createPlane()),
+                "alpha":alpha,
+                "beta":beta,
+                "origin":{"x":400,"y":400,"z":240,"vd":5}})
+
+            .attr({
+                fill: 'rgba(0,0,255,0.2)' ,
+                zIndex: 2
+            })
+            .add();
+        }
+
+        socket.on('weights', function(msg){
+            var weights = JSON.parse(msg);
+            w0 = weights.w0;
+            w1 = weights.w1;
+            w2 = weights.w2;
+            render();
+        });
+
+        function defaultData(empty){
+
+            if(empty){
+                return []
+            }
+            else {
+                return [[3,2,2],[3,2,2],[4,2,2],[4,2,2],[3,2,2],[3,2,2],[3,2,2],[3,2,2],[3,2,2],[3,2,2],[3,2,1],[3,1,2],[3,2,2],[3,2,2],[3,2,1],[3,1,1],[3,1,1],[3,1,1],[3,1,1],[3,1,1],[2,1,1],[2,1,1],[2,1,1],[2,1,1],[2,1,1],[2,1,1],[1,1,1],[1,1,1],[1,1,1],[1,1,1],[1,1,1],[1,1,1],[1,1,1],[2,1,1],[2,1,1],[2,1,1],[2,1,1],[2,1,1],[2,1,1],[2,1,1],[2,1,1],[2,1,2],[2,2,2],[2,2,2],[3,2,2],[3,2,2],[3,2,2],[4,2,3],[4,3,3],[4,3,3],[5,3,3],[4,3,3],[5,3,3],[5,3,3],[5,3,3],[5,3,3],[5,3,3],[5,3,3],[5,3,3],[6,3,3],[6,3,3],[6,3,3],[6,3,3],[6,3,3],[6,3,3],[6,3,3],[6,3,3],[6,3,3],[6,3,3],[6,3,3],[6,3,3],[6,3,3],[6,3,3],[6,3,3],[5,3,3],[5,3,3],[5,3,3],[5,3,3],[5,3,3],[5,3,3],[5,3,3],[5,3,3],[5,3,3],[5,3,3],[5,3,3],[5,3,3],[4,3,2],[4,2,2],[4,2,2],[4,2,2],[4,2,2],[4,2,2],[3,2,1],[3,1,1],[4,1,1],[3,1,1],[3,1,2],[3,2,1],[3,1,1],[3,1,1],[3,1,1]];
+            }
+        }
+
+        Highcharts.getOptions().colors = $.map(Highcharts.getOptions().colors, function (color) {
+            return {
+                radialGradient: {
+                    cx: 0.4,
+                    cy: 0.3,
+                    r: 0.5
+                },
+                stops: [
+                [0, color],
+                [1, Highcharts.Color(color).brighten(-0.2).get('rgb')]
+                ]
+            };
+        });
+
+        var ml_vis = $('#ml-vis').highcharts({
+            chart: {
+                type: 'scatter',
+                margin: 100,
+                options3d: {
+                    enabled: true,
+                    alpha: 0,
+                    beta: 0,
+                    depth: 250,
+                    viewDistance: 5,
+
+                    frame: {
+                        bottom: { size: 1, color: 'rgba(0,0,0,0.02)' },
+                        back: { size: 1, color: 'rgba(0,0,0,0.04)' },
+                        side: { size: 1, color: 'rgba(0,0,0,0.06)' }
+                    }
+                },
+
+                events: {
+                    load: function () {
+                        c = this;
+                        addMlData(this);
+                        //c.options.chart.options3d.alpha = 0;
+                        //c.options.chart.options3d.beta = 0;
+                        //chart.redraw(false);
+
+                        render(this, c.options.chart.options3d.alpha, c.options.chart.options3d.beta);
+                        setRotation(this, function(showLabels){
+                            c.yAxis[0].axisTitle.attr({
+                                text: ''
+                            });
+
+                            c.xAxis[0].axisTitle.attr({
+                                text: ''
+                            });
+
+                            if(showLabels) {
+                                c.yAxis[0].axisTitle.attr({
+                                    text: 'T-1 Hour'
+                                });
+
+                                c.xAxis[0].axisTitle.attr({
+                                    text: 'T-1 Year'
+                                });
+                            }
+
+                        }, function(a, b){
+                            alpha = a;
+                            beta  = b;
+                            render();
+                        });
+                    }
+                }
+            },
+
+            yAxis: {
+                min: 0,
+                max: 10,
+                gridLineWidth: 1,
+                title: {
+                    text: "T-1 Hour"
+                }
+
+
+            },
+            xAxis: {
+                min: 0,
+                max: 10,
+                gridLineWidth: 1,
+                title: {
+                    text: "T-1 Year"
+                }
+
+            },
+            zAxis: {
+                min: 0,
+                max: 10,
+                gridLineWidth: 1,
+                title: {
+                    text: "T"
+                }
+
+            },
+
+            plotOptions: {
+                scatter: {
+                    width: 10,
+                    height: 10,
+                    depth: 10
+                }
+            },
+
+            series: [{
+                id: 'opt-servers',
+                name: '(T-1 Year, T-1 Hour, T)',
+                colorByPoint: true,
+                data: defaultData(true)
+            }]
+        });
+
+    });
+
+    </script>
+</head>
+<body>
+    <div id="container" style="width: 49%; height: 380px; float:left;"></div>
+    <div id="responseTime" style="width: 49%; height: 380px; float:right;"></div>
+    <div id="container2" style="min-width: 310px; height: 400px; margin: 0 auto; clear:both;"></div>
+
+    <div id="ml-vis" style="margin-left:auto; margin-right: auto; height: 800px; width:800px;"></div>
+
+</body>
+</body>
+</html>
